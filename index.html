@@ -647,4 +647,612 @@ function draw() {
       ctx.textAlign = 'center';
       ctx.fillText(ITEM_TYPES[backpack.slots[i].type].icon, ix + 14, iy + 14);
       if (backpack.slots[i].count > 1) {
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>彈幕躲避 V1.0</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { overflow: hidden; background: #0a0a15; touch-action: none; user-select: none; -webkit-user-select: none; }
+canvas { display: block; }
+#version { position: fixed; top: 8px; left: 8px; color: #00ff88; font-family: monospace; font-size: 14px; font-weight: bold; pointer-events: none; z-index: 10; }
+</style>
+</head>
+<body>
+<div id="version">V1.0</div>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ========== 遊戲狀態 ==========
+const game = { state: 'playing', score: 0, time: 0 };
+
+// ========== 玩家 ==========
+const player = {
+  x: canvas.width / 2,
+  y: canvas.height / 2,
+  radius: 18,
+  hp: 100,
+  maxHp: 100,
+  speed: 4.5,
+  shield: 0,
+  invincible: 0
+};
+
+// ========== 輸入 ==========
+const keys = {};
+let touchId = null, touchStartX = 0, touchStartY = 0;
+
+// ========== 實體 ==========
+let bullets = [];
+let items = [];
+let particles = [];
+let floatingTexts = [];
+
+// ========== 背包 (20格) ==========
+const backpack = {
+  slots: new Array(20).fill(null)
+};
+
+const ITEM_TYPES = {
+  SHIELD: { name: '保護盾', color: '#00aaff', icon: '🛡️', maxStack: 3 },
+  ERASER: { name: '消除器', color: '#ff6600', icon: '💥', maxStack: 5 },
+  COMPUTER: { name: '電腦', color: '#00ff88', icon: '💻', maxStack: 3 },
+  QUILT: { name: '棉被', color: '#ffccaa', icon: '🛏️', maxStack: 5 }
+};
+
+// ========== 音效 ==========
+const sounds = {};
+function loadSound(name, url) {
+  const a = new Audio(url);
+  a.volume = 0.35;
+  sounds[name] = a;
+}
+loadSound('pickup', 'https://assets.mixkit.co/active_storage/sfx/2578/2578-preview.mp3');
+loadSound('hit', 'https://assets.mixkit.co/active_storage/sfx/1435/1435-preview.mp3');
+loadSound('shield', 'https://assets.mixkit.co/active_storage/sfx/2019/2019-preview.mp3');
+loadSound('revive', 'https://assets.mixkit.co/active_storage/sfx/1434/1434-preview.mp3');
+loadSound('eraser', 'https://assets.mixkit.co/active_storage/sfx/2571/2571-preview.mp3');
+
+function playSound(name) {
+  if (sounds[name]) {
+    sounds[name].currentTime = 0;
+    sounds[name].play().catch(() => {});
+  }
+}
+
+// ========== 鍵盤輸入 ==========
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ' || e.key.toLowerCase() === 'e') {
+    e.preventDefault();
+    useEraser();
+  }
+});
+document.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+// ========== 觸控輸入 ==========
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) {
+    touchId = e.touches[0].identifier;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    if (e.changedTouches[i].identifier === touchId) {
+      const dx = e.changedTouches[i].clientX - touchStartX;
+      const dy = e.changedTouches[i].clientY - touchStartY;
+      player.x += dx * 0.8;
+      player.y += dy * 0.8;
+      touchStartX = e.changedTouches[i].clientX;
+      touchStartY = e.changedTouches[i].clientY;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    if (e.changedTouches[i].identifier === touchId) {
+      touchId = null;
+    }
+  }
+});
+canvas.addEventListener('touchcancel', e => { touchId = null; });
+
+// ========== 背包工具函數 ==========
+function addToBackpack(type) {
+  for (let i = 0; i < backpack.slots.length; i++) {
+    if (backpack.slots[i] === null) {
+      backpack.slots[i] = { type: type, count: 1 };
+      return true;
+    } else if (backpack.slots[i].type === type && backpack.slots[i].count < ITEM_TYPES[type].maxStack) {
+      backpack.slots[i].count++;
+      return true;
+    }
+  }
+  return false;
+}
+
+function countInBackpack(type) {
+  let count = 0;
+  for (let i = 0; i < backpack.slots.length; i++) {
+    if (backpack.slots[i] && backpack.slots[i].type === type) count += backpack.slots[i].count;
+  }
+  return count;
+}
+
+function removeFromBackpack(type, count = 1) {
+  for (let i = 0; i < backpack.slots.length && count > 0; i++) {
+    if (backpack.slots[i] && backpack.slots[i].type === type) {
+      const remove = Math.min(count, backpack.slots[i].count);
+      backpack.slots[i].count -= remove;
+      count -= remove;
+      if (backpack.slots[i].count <= 0) backpack.slots[i] = null;
+    }
+  }
+}
+
+// ========== 使用消除器 ==========
+function useEraser() {
+  if (countInBackpack('ERASER') > 0) {
+    removeFromBackpack('ERASER', 1);
+    playSound('eraser');
+    const range = 180;
+    let cleared = 0;
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const dx = bullets[i].x - player.x;
+      const dy = bullets[i].y - player.y;
+      if (Math.sqrt(dx * dx + dy * dy) < range) {
+        createParticles(bullets[i].x, bullets[i].y, '#ffff00', 5);
+        bullets.splice(i, 1);
+        cleared++;
+      }
+    }
+    if (cleared > 0) {
+      floatingTexts.push({ x: player.x, y: player.y - 30, text: '清除 ' + cleared + ' 發!', life: 60, color: '#ff6600' });
+    }
+  }
+}
+
+// ========== 生成子彈 ==========
+function spawnBullet() {
+  const side = Math.floor(Math.random() * 4);
+  let x, y, vx, vy;
+  const speed = 1.5 + game.time * 0.0005 + Math.random() * 1.5;
+  const margin = 30;
+  if (side === 0) { x = Math.random() * canvas.width; y = -margin; }
+  else if (side === 1) { x = canvas.width + margin; y = Math.random() * canvas.height; }
+  else if (side === 2) { x = Math.random() * canvas.width; y = canvas.height + margin; }
+  else { x = -margin; y = Math.random() * canvas.height; }
+  const angle = Math.atan2(player.y - y, player.x - x);
+  vx = Math.cos(angle) * speed;
+  vy = Math.sin(angle) * speed;
+  bullets.push({ x, y, vx, vy, radius: 5, color: '#ff0044' });
+}
+
+// ========== 生成道具 ==========
+function spawnItem() {
+  const types = ['SHIELD', 'ERASER', 'COMPUTER', 'QUILT'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  const x = 50 + Math.random() * (canvas.width - 100);
+  const y = 50 + Math.random() * (canvas.height - 100);
+  items.push({ x, y, type, radius: 14, life: 600 });
+}
+
+// ========== 粒子效果 ==========
+function createParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 3;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 30 + Math.random() * 20,
+      color, radius: 2 + Math.random() * 3
+    });
+  }
+}
+
+// ========== 受傷處理 ==========
+function takeDamage(amount) {
+  if (player.invincible > 0) return;
+
+  // 1. 保護盾優先
+  if (player.shield > 0) {
+    player.shield--;
+    playSound('shield');
+    createParticles(player.x, player.y, '#00aaff', 10);
+    floatingTexts.push({ x: player.x, y: player.y - 40, text: '護盾抵擋! (' + player.shield + ')', life: 45, color: '#00aaff' });
+    if (player.shield <= 0) {
+      floatingTexts.push({ x: player.x, y: player.y - 55, text: '護盾破碎!', life: 45, color: '#ff0044' });
+    }
+    return;
+  }
+
+  // 2. 棉被自動擋一次
+  if (countInBackpack('QUILT') > 0) {
+    removeFromBackpack('QUILT', 1);
+    playSound('shield');
+    createParticles(player.x, player.y, '#ffccaa', 8);
+    floatingTexts.push({ x: player.x, y: player.y - 40, text: '🛏️棉被擋住了!', life: 45, color: '#ffccaa' });
+    return;
+  }
+
+  // 3. 扣血
+  player.hp -= amount;
+  playSound('hit');
+  createParticles(player.x, player.y, '#ff0044', 8);
+  player.invincible = 30;
+
+  if (player.hp <= 0) {
+    player.hp = 0;
+    handleDeath();
+  }
+}
+
+// ========== 死亡處理（被動復活） ==========
+function handleDeath() {
+  // 優先順序：消除器 > 電腦
+  if (countInBackpack('ERASER') > 0) {
+    removeFromBackpack('ERASER', 1);
+    revivePlayer('💥消除器復活!');
+    return;
+  }
+  if (countInBackpack('COMPUTER') > 0) {
+    removeFromBackpack('COMPUTER', 1);
+    revivePlayer('💻電腦復活!');
+    return;
+  }
+  // 真的死了
+  game.state = 'gameover';
+  floatingTexts.push({ x: canvas.width / 2, y: canvas.height / 2 - 40, text: '遊戲結束! 分數:' + game.score, life: 300, color: '#ff0044' });
+}
+
+function revivePlayer(msg) {
+  player.hp = player.maxHp;
+  player.invincible = 120;
+  playSound('revive');
+  createParticles(player.x, player.y, '#00ff88', 20);
+  floatingTexts.push({ x: player.x, y: player.y - 50, text: msg, life: 60, color: '#00ff88' });
+  // 復活時清除周圍子彈
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const dx = bullets[i].x - player.x;
+    const dy = bullets[i].y - player.y;
+    if (Math.sqrt(dx * dx + dy * dy) < 150) {
+      bullets.splice(i, 1);
+    }
+  }
+}
+
+// ========== 更新 ==========
+function update() {
+  if (game.state !== 'playing') return;
+
+  game.time++;
+  game.score = Math.floor(game.time / 10);
+
+  // 玩家移動（電腦）
+  let mx = 0, my = 0;
+  if (keys['w'] || keys['arrowup']) my -= 1;
+  if (keys['s'] || keys['arrowdown']) my += 1;
+  if (keys['a'] || keys['arrowleft']) mx -= 1;
+  if (keys['d'] || keys['arrowright']) mx += 1;
+  if (mx !== 0 || my !== 0) {
+    const len = Math.sqrt(mx * mx + my * my);
+    mx /= len; my /= len;
+  }
+  player.x += mx * player.speed;
+  player.y += my * player.speed;
+
+  // 邊界限制
+  player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
+  player.y = Math.max(player.radius, Math.min(canvas.height - player.radius, player.y));
+
+  // 無敵時間遞減
+  if (player.invincible > 0) player.invincible--;
+
+  // 生成子彈
+  const spawnRate = Math.max(5, 30 - Math.floor(game.time / 300));
+  if (game.time % spawnRate === 0) spawnBullet();
+  if (game.time > 600 && game.time % (spawnRate * 2) === 0) spawnBullet();
+  if (game.time > 1800 && game.time % (spawnRate * 3) === 0) spawnBullet();
+
+  // 生成道具
+  if (game.time % 400 === 0) spawnItem();
+
+  // 更新子彈
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    if (b.x < -50 || b.x > canvas.width + 50 || b.y < -50 || b.y > canvas.height + 50) {
+      bullets.splice(i, 1);
+      continue;
+    }
+    // 碰撞檢測
+    const dx = b.x - player.x;
+    const dy = b.y - player.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < b.radius + player.radius) {
+      takeDamage(10);
+      bullets.splice(i, 1);
+    }
+  }
+
+  // 更新道具
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    item.life--;
+    if (item.life <= 0) {
+      items.splice(i, 1);
+      continue;
+    }
+    const dx = item.x - player.x;
+    const dy = item.y - player.y;
+    if (Math.sqrt(dx * dx + dy * dy) < item.radius + player.radius) {
+      if (addToBackpack(item.type)) {
+        playSound('pickup');
+        if (item.type === 'SHIELD') {
+          player.shield = 3;
+          floatingTexts.push({ x: player.x, y: player.y - 40, text: '🛡️護盾啟動(3次)', life: 50, color: '#00aaff' });
+        } else {
+          floatingTexts.push({ x: player.x, y: player.y - 40, text: ITEM_TYPES[item.type].icon + ' ' + ITEM_TYPES[item.type].name, life: 50, color: ITEM_TYPES[item.type].color });
+        }
+        items.splice(i, 1);
+      }
+    }
+  }
+
+  // 更新粒子
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  // 更新漂浮文字
+  for (let i = floatingTexts.length - 1; i >= 0; i--) {
+    floatingTexts[i].y -= 0.5;
+    floatingTexts[i].life--;
+    if (floatingTexts[i].life <= 0) floatingTexts.splice(i, 1);
+  }
+}
+
+// ========== 繪製 ==========
+function draw() {
+  ctx.fillStyle = '#0a0a15';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // 網格背景
+  ctx.strokeStyle = 'rgba(0,255,136,0.05)';
+  ctx.lineWidth = 1;
+  for (let x = 0; x < canvas.width; x += 40) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+  }
+  for (let y = 0; y < canvas.height; y += 40) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+  }
+
+  // 道具
+  for (const item of items) {
+    const it = ITEM_TYPES[item.type];
+    ctx.save();
+    ctx.translate(item.x, item.y);
+    ctx.fillStyle = it.color;
+    ctx.globalAlpha = 0.15 + Math.sin(game.time * 0.1) * 0.1;
+    ctx.beginPath();
+    ctx.arc(0, 0, item.radius + 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = it.color;
+    ctx.beginPath();
+    ctx.arc(0, 0, item.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(it.icon, 0, 1);
+    ctx.restore();
+  }
+
+  // 玩家護盾光環
+  if (player.shield > 0) {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.strokeStyle = `rgba(0,170,255,${0.4 + Math.sin(game.time * 0.15) * 0.2})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, player.radius + 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(0,170,255,0.08)';
+    ctx.beginPath();
+    ctx.arc(0, 0, player.radius + 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 玩家
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  if (player.invincible > 0 && Math.floor(player.invincible / 4) % 2 === 0) {
+    ctx.globalAlpha = 0.4;
+  }
+  ctx.fillStyle = '#00ff88';
+  ctx.shadowColor = '#00ff88';
+  ctx.shadowBlur = 15;
+  ctx.beginPath();
+  ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(-5, -5, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // 子彈
+  for (const b of bullets) {
+    ctx.fillStyle = b.color;
+    ctx.shadowColor = b.color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // 粒子
+  for (const p of particles) {
+    ctx.globalAlpha = p.life / 50;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // 漂浮文字
+  for (const ft of floatingTexts) {
+    ctx.globalAlpha = Math.min(1, ft.life / 20);
+    ctx.fillStyle = ft.color;
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(ft.text, ft.x, ft.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // UI - 血量條
+  const barW = 200, barH = 18;
+  const barX = canvas.width / 2 - barW / 2, barY = 12;
+  ctx.fillStyle = 'rgba(255,0,68,0.2)';
+  ctx.fillRect(barX, barY, barW, barH);
+  ctx.fillStyle = player.hp > 30 ? '#00ff88' : '#ff0044';
+  ctx.fillRect(barX, barY, barW * (player.hp / player.maxHp), barH);
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, barH);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('HP ' + player.hp + '/' + player.maxHp, canvas.width / 2, barY + 13);
+
+  // UI - 分數
+  ctx.fillStyle = '#00ff88';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('分數: ' + game.score, canvas.width - 12, 24);
+
+  // UI - 背包
+  const bpX = 12, bpY = canvas.height - 110;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(bpX - 4, bpY - 4, 168, 108);
+  ctx.strokeStyle = 'rgba(0,255,136,0.3)';
+  ctx.strokeRect(bpX - 4, bpY - 4, 168, 108);
+  ctx.fillStyle = '#00ff88';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('背包 (20格)', bpX, bpY + 10);
+  for (let i = 0; i < 20; i++) {
+    const ix = bpX + (i % 5) * 32;
+    const iy = bpY + 16 + Math.floor(i / 5) * 22;
+    ctx.fillStyle = backpack.slots[i] ? 'rgba(0,255,136,0.15)' : 'rgba(255,255,255,0.05)';
+    ctx.fillRect(ix, iy, 28, 18);
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.strokeRect(ix, iy, 28, 18);
+    if (backpack.slots[i]) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(ITEM_TYPES[backpack.slots[i].type].icon, ix + 14, iy + 14);
+      if (backpack.slots[i].count > 1) {
+        ctx.fillStyle = '#ff0';
+        ctx.font = '9px monospace';
+        ctx.fillText(backpack.slots[i].count, ix + 24, iy + 8);
+      }
+    }
+  }
+
+  // UI - 護盾狀態
+  if (player.shield > 0) {
+    ctx.fillStyle = '#00aaff';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('🛡️護盾 x' + player.shield, 12, 50);
+  }
+
+  // UI - 消除器提示
+  if (countInBackpack('ERASER') > 0) {
+    ctx.fillStyle = '#ff6600';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('💥消除器: ' + countInBackpack('ERASER') + '個 [E/空格]', 12, 68);
+  }
+
+  // 遊戲結束
+  if (game.state === 'gameover') {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ff0044';
+    ctx.font = 'bold 36px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('遊戲結束', canvas.width / 2, canvas.height / 2 - 20);
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px sans-serif';
+    ctx.fillText('最終分數: ' + game.score, canvas.width / 2, canvas.height / 2 + 20);
+    ctx.font = '14px sans-serif';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('點擊畫面重新開始', canvas.width / 2, canvas.height / 2 + 55);
+  }
+}
+
+// ========== 重新開始 ==========
+function restart() {
+  game.state = 'playing';
+  game.score = 0;
+  game.time = 0;
+  player.x = canvas.width / 2;
+  player.y = canvas.height / 2;
+  player.hp = 100;
+  player.shield = 0;
+  player.invincible = 0;
+  bullets = [];
+  items = [];
+  particles = [];
+  floatingTexts = [];
+  for (let i = 0; i < backpack.slots.length; i++) backpack.slots[i] = null;
+}
+
+canvas.addEventListener('click', () => {
+  if (game.state === 'gameover') restart();
+});
+
+// ========== 主循環 ==========
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
 
