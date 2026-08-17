@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>彈幕躲避 V1.0</title>
+<title>彈幕躲避 V1.1</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { overflow: hidden; background: #0a0a15; touch-action: none; user-select: none; -webkit-user-select: none; }
@@ -12,7 +12,7 @@ canvas { display: block; }
 </style>
 </head>
 <body>
-<div id="version">V1.0</div>
+<div id="version">V1.1</div>
 <canvas id="game"></canvas>
 <script>
 const canvas = document.getElementById('game');
@@ -37,7 +37,11 @@ const player = {
   maxHp: 100,
   speed: 4.5,
   shield: 0,
-  invincible: 0
+  invincible: 0,
+  slowTimer: 0,
+  magnetTimer: 0,
+  speedTimer: 0,
+  reflect: 0
 };
 
 // ========== 輸入 ==========
@@ -59,7 +63,11 @@ const ITEM_TYPES = {
   SHIELD: { name: '保護盾', color: '#00aaff', icon: '🛡️', maxStack: 3 },
   ERASER: { name: '消除器', color: '#ff6600', icon: '💥', maxStack: 5 },
   COMPUTER: { name: '電腦', color: '#00ff88', icon: '💻', maxStack: 3 },
-  QUILT: { name: '棉被', color: '#ffccaa', icon: '🛏️', maxStack: 5 }
+  QUILT: { name: '棉被', color: '#ffccaa', icon: '🛏️', maxStack: 5 },
+  TIME_CAPSULE: { name: '時間膠囊', color: '#aa88ff', icon: '⏰', maxStack: 5, instant: true },
+  MAGNET: { name: '磁鐵', color: '#ff44aa', icon: '🧲', maxStack: 5, instant: true },
+  SPEED_BOOST: { name: '加速鞋', color: '#ffee00', icon: '💨', maxStack: 5, instant: true },
+  REFLECT: { name: '反彈盾', color: '#00ffff', icon: '⚡', maxStack: 3 }
 };
 
 // ========== 音效 ==========
@@ -194,12 +202,12 @@ function spawnBullet() {
   const angle = Math.atan2(player.y - y, player.x - x);
   vx = Math.cos(angle) * speed;
   vy = Math.sin(angle) * speed;
-  bullets.push({ x, y, vx, vy, radius: 5, color: '#ff0044' });
+  bullets.push({ x, y, vx, vy, radius: 5, color: '#ff0044', friendly: false });
 }
 
 // ========== 生成道具 ==========
 function spawnItem() {
-  const types = ['SHIELD', 'ERASER', 'COMPUTER', 'QUILT'];
+  const types = ['SHIELD', 'ERASER', 'COMPUTER', 'QUILT', 'TIME_CAPSULE', 'MAGNET', 'SPEED_BOOST', 'REFLECT'];
   const type = types[Math.floor(Math.random() * types.length)];
   const x = 50 + Math.random() * (canvas.width - 100);
   const y = 50 + Math.random() * (canvas.height - 100);
@@ -222,8 +230,21 @@ function createParticles(x, y, color, count) {
 }
 
 // ========== 受傷處理 ==========
-function takeDamage(amount) {
+function takeDamage(amount, bulletRef) {
   if (player.invincible > 0) return;
+
+  // 0. 反彈盾優先（把子彈彈回去變成友軍子彈）
+  if (player.reflect > 0 && bulletRef) {
+    player.reflect--;
+    playSound('shield');
+    bulletRef.vx *= -1.6;
+    bulletRef.vy *= -1.6;
+    bulletRef.friendly = true;
+    bulletRef.color = '#00ffff';
+    createParticles(player.x, player.y, '#00ffff', 10);
+    floatingTexts.push({ x: player.x, y: player.y - 40, text: '⚡反彈! (' + player.reflect + ')', life: 45, color: '#00ffff' });
+    return true; // 表示子彈不刪除，被反彈了
+  }
 
   // 1. 保護盾優先
   if (player.shield > 0) {
@@ -234,7 +255,7 @@ function takeDamage(amount) {
     if (player.shield <= 0) {
       floatingTexts.push({ x: player.x, y: player.y - 55, text: '護盾破碎!', life: 45, color: '#ff0044' });
     }
-    return;
+    return false;
   }
 
   // 2. 棉被自動擋一次
@@ -243,7 +264,7 @@ function takeDamage(amount) {
     playSound('shield');
     createParticles(player.x, player.y, '#ffccaa', 8);
     floatingTexts.push({ x: player.x, y: player.y - 40, text: '🛏️棉被擋住了!', life: 45, color: '#ffccaa' });
-    return;
+    return false;
   }
 
   // 3. 扣血
@@ -256,6 +277,7 @@ function takeDamage(amount) {
     player.hp = 0;
     handleDeath();
   }
+  return false;
 }
 
 // ========== 死亡處理（被動復活） ==========
@@ -292,6 +314,20 @@ function revivePlayer(msg) {
   }
 }
 
+// ========== 使用即時道具效果 ==========
+function activateInstantItem(type) {
+  if (type === 'TIME_CAPSULE') {
+    player.slowTimer = 180; // 3秒 (60fps)
+    floatingTexts.push({ x: player.x, y: player.y - 40, text: '⏰時間減緩!', life: 50, color: '#aa88ff' });
+  } else if (type === 'MAGNET') {
+    player.magnetTimer = 300; // 5秒
+    floatingTexts.push({ x: player.x, y: player.y - 40, text: '🧲磁力吸引!', life: 50, color: '#ff44aa' });
+  } else if (type === 'SPEED_BOOST') {
+    player.speedTimer = 300; // 5秒
+    floatingTexts.push({ x: player.x, y: player.y - 40, text: '💨加速中!', life: 50, color: '#ffee00' });
+  }
+}
+
 // ========== 更新 ==========
 function update() {
   if (game.state !== 'playing') return;
@@ -299,7 +335,12 @@ function update() {
   game.time++;
   game.score = Math.floor(game.time / 10);
 
-  // 玩家移動（電腦）
+  // 計時型 buff 遞減
+  if (player.slowTimer > 0) player.slowTimer--;
+  if (player.magnetTimer > 0) player.magnetTimer--;
+  if (player.speedTimer > 0) player.speedTimer--;
+
+  // 玩家移動（鍵盤）
   let mx = 0, my = 0;
   if (keys['w'] || keys['arrowup']) my -= 1;
   if (keys['s'] || keys['arrowdown']) my += 1;
@@ -309,8 +350,9 @@ function update() {
     const len = Math.sqrt(mx * mx + my * my);
     mx /= len; my /= len;
   }
-  player.x += mx * player.speed;
-  player.y += my * player.speed;
+  const currentSpeed = player.speedTimer > 0 ? player.speed * 1.8 : player.speed;
+  player.x += mx * currentSpeed;
+  player.y += my * currentSpeed;
 
   // 邊界限制
   player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
@@ -328,22 +370,43 @@ function update() {
   // 生成道具
   if (game.time % 400 === 0) spawnItem();
 
+  // 子彈減速倍率（時間膠囊效果）
+  const slowMul = player.slowTimer > 0 ? 0.4 : 1;
+
   // 更新子彈
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
-    b.x += b.vx;
-    b.y += b.vy;
+    b.x += b.vx * slowMul;
+    b.y += b.vy * slowMul;
     if (b.x < -50 || b.x > canvas.width + 50 || b.y < -50 || b.y > canvas.height + 50) {
       bullets.splice(i, 1);
       continue;
     }
+
+    if (b.friendly) {
+      // 友軍反彈子彈：碰到敵方子彈就互相消除
+      for (let j = bullets.length - 1; j >= 0; j--) {
+        if (j === i || bullets[j].friendly) continue;
+        const dx2 = bullets[j].x - b.x;
+        const dy2 = bullets[j].y - b.y;
+        if (Math.sqrt(dx2 * dx2 + dy2 * dy2) < b.radius + bullets[j].radius) {
+          createParticles(b.x, b.y, '#00ffff', 6);
+          bullets.splice(j, 1);
+          if (j < i) i--;
+          bullets.splice(i, 1);
+          break;
+        }
+      }
+      continue;
+    }
+
     // 碰撞檢測
     const dx = b.x - player.x;
     const dy = b.y - player.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < b.radius + player.radius) {
-      takeDamage(10);
-      bullets.splice(i, 1);
+      const reflected = takeDamage(10, b);
+      if (!reflected) bullets.splice(i, 1);
     }
   }
 
@@ -355,14 +418,35 @@ function update() {
       items.splice(i, 1);
       continue;
     }
+
+    // 磁鐵效果：吸引道具靠近玩家
+    if (player.magnetTimer > 0) {
+      const dxm = player.x - item.x;
+      const dym = player.y - item.y;
+      const distm = Math.sqrt(dxm * dxm + dym * dym);
+      if (distm > 1 && distm < 500) {
+        item.x += (dxm / distm) * 6;
+        item.y += (dym / distm) * 6;
+      }
+    }
+
     const dx = item.x - player.x;
     const dy = item.y - player.y;
     if (Math.sqrt(dx * dx + dy * dy) < item.radius + player.radius) {
-      if (addToBackpack(item.type)) {
+      const info = ITEM_TYPES[item.type];
+      if (info.instant) {
+        // 即時型道具：直接觸發效果，不佔背包格
+        playSound('pickup');
+        activateInstantItem(item.type);
+        items.splice(i, 1);
+      } else if (addToBackpack(item.type)) {
         playSound('pickup');
         if (item.type === 'SHIELD') {
           player.shield = 3;
           floatingTexts.push({ x: player.x, y: player.y - 40, text: '🛡️護盾啟動(3次)', life: 50, color: '#00aaff' });
+        } else if (item.type === 'REFLECT') {
+          player.reflect = Math.min(player.reflect + 3, 9);
+          floatingTexts.push({ x: player.x, y: player.y - 40, text: '⚡反彈盾啟動(+3)', life: 50, color: '#00ffff' });
         } else {
           floatingTexts.push({ x: player.x, y: player.y - 40, text: ITEM_TYPES[item.type].icon + ' ' + ITEM_TYPES[item.type].name, life: 50, color: ITEM_TYPES[item.type].color });
         }
@@ -403,6 +487,12 @@ function draw() {
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
   }
 
+  // 時間膠囊效果：畫面淡淡的紫色濾鏡
+  if (player.slowTimer > 0) {
+    ctx.fillStyle = 'rgba(170,136,255,0.08)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
   // 道具
   for (const item of items) {
     const it = ITEM_TYPES[item.type];
@@ -438,6 +528,28 @@ function draw() {
     ctx.fillStyle = 'rgba(0,170,255,0.08)';
     ctx.beginPath();
     ctx.arc(0, 0, player.radius + 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 反彈盾光環
+  if (player.reflect > 0) {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.strokeStyle = `rgba(0,255,255,${0.5 + Math.sin(game.time * 0.2) * 0.3})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, player.radius + 20, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 加速鞋效果：拖尾
+  if (player.speedTimer > 0) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,238,0,0.25)';
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.radius + 6, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
@@ -535,75 +647,4 @@ function draw() {
       ctx.textAlign = 'center';
       ctx.fillText(ITEM_TYPES[backpack.slots[i].type].icon, ix + 14, iy + 14);
       if (backpack.slots[i].count > 1) {
-        ctx.fillStyle = '#ff0';
-        ctx.font = '9px monospace';
-        ctx.fillText(backpack.slots[i].count, ix + 24, iy + 8);
-      }
-    }
-  }
-
-  // UI - 護盾狀態
-  if (player.shield > 0) {
-    ctx.fillStyle = '#00aaff';
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText('🛡️護盾 x' + player.shield, 12, 50);
-  }
-
-  // UI - 消除器提示
-  if (countInBackpack('ERASER') > 0) {
-    ctx.fillStyle = '#ff6600';
-    ctx.font = '11px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText('💥消除器: ' + countInBackpack('ERASER') + '個 [E/空格]', 12, 68);
-  }
-
-  // 遊戲結束
-  if (game.state === 'gameover') {
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#ff0044';
-    ctx.font = 'bold 36px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('遊戲結束', canvas.width / 2, canvas.height / 2 - 20);
-    ctx.fillStyle = '#fff';
-    ctx.font = '20px sans-serif';
-    ctx.fillText('最終分數: ' + game.score, canvas.width / 2, canvas.height / 2 + 20);
-    ctx.font = '14px sans-serif';
-    ctx.fillStyle = '#aaa';
-    ctx.fillText('點擊畫面重新開始', canvas.width / 2, canvas.height / 2 + 55);
-  }
-}
-
-// ========== 重新開始 ==========
-function restart() {
-  game.state = 'playing';
-  game.score = 0;
-  game.time = 0;
-  player.x = canvas.width / 2;
-  player.y = canvas.height / 2;
-  player.hp = 100;
-  player.shield = 0;
-  player.invincible = 0;
-  bullets = [];
-  items = [];
-  particles = [];
-  floatingTexts = [];
-  for (let i = 0; i < backpack.slots.length; i++) backpack.slots[i] = null;
-}
-
-canvas.addEventListener('click', () => {
-  if (game.state === 'gameover') restart();
-});
-
-// ========== 主循環 ==========
-function loop() {
-  update();
-  draw();
-  requestAnimationFrame(loop);
-}
-loop();
-</script>
-</body>
-</html>
 
